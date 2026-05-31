@@ -1,0 +1,61 @@
+import yfinance as yf
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+# Download data
+start_date = '2020-01-01'
+end_date = '2025-06-30'
+
+nikkei = yf.download('^N225', start=start_date, end=end_date)['Close']
+usdjpy = yf.download('JPY=X', start=start_date, end=end_date)['Close']
+
+# Resample to monthly
+nikkei_monthly = nikkei.resample('M').last()
+usdjpy_monthly = usdjpy.resample('M').last()
+
+# Calculate % change
+nikkei_pct_change = (nikkei_monthly / nikkei_monthly.iloc[0] - 1) * 100
+
+# Combine
+df = pd.concat([usdjpy_monthly, nikkei_pct_change], axis=1)
+df.columns = ['USDJPY', 'Nikkei_225_%']
+df.dropna(inplace=True)
+
+# --- FIX: Force dark theme elements ---
+sns.set_style("dark", {
+    'axes.facecolor': '#111111',
+    'axes.edgecolor': 'white',
+    'figure.facecolor': '#111111',
+    'grid.color': '#444444',
+    'text.color': 'white',
+    'xtick.color': 'white',
+    'ytick.color': 'white'
+})
+
+# Create figure and axes
+fig, ax = plt.subplots(figsize=(12, 6))
+fig.patch.set_facecolor('#111111')  # full background
+ax.set_facecolor('#111111')         # plot area
+
+# Scatter + regression
+sns.regplot(
+    data=df,
+    x='USDJPY',
+    y='Nikkei_225_%',
+    scatter_kws={'color': 'cyan', 's': 50, 'alpha': 0.8},
+    line_kws={'color': 'lime', 'lw': 2},
+    ax=ax
+)
+
+# Titles and labels
+ax.set_title('Impact of USD/JPY on Nikkei 225 Performance (Monthly % Change)', fontsize=16, color='white')
+ax.set_xlabel('USD/JPY Exchange Rate', fontsize=14, color='white')
+ax.set_ylabel('Nikkei 225 % Change (Since Jan 2020)', fontsize=14, color='white')
+
+# Grid and ticks
+ax.grid(True, linestyle='--', alpha=0.3)
+ax.tick_params(colors='white')
+
+plt.tight_layout()
+plt.show()
