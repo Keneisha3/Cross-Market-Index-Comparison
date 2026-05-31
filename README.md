@@ -1,4 +1,3 @@
-# Cross-Market-Index-Comparison
 # Macroeconomic Influences on Equity Indices: JPY225 vs US30
 
 ## Overview
