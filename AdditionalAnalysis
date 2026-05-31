@@ -1,0 +1,509 @@
+import yfinance as yf
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from pandas.plotting import autocorrelation_plot, lag_plot
+import matplotlib.dates as mdates
+from sklearn.decomposition import PCA
+from scipy import stats
+
+plt.style.use('dark_background')
+
+
+def download_data(tickers, start='2023-01-01', end='2025-06-30'):
+    df = yf.download(tickers, start=start, end=end)['Close']
+    if isinstance(df, pd.Series):
+        df = df.to_frame()
+    return df
+
+
+def compute_returns(price_df):
+    daily = price_df.pct_change().dropna() * 100
+    monthly = price_df.resample('ME').last().pct_change().dropna() * 100
+    cum = (1 + price_df.pct_change().fillna(0)).cumprod() - 1
+    return daily, monthly, cum
+
+
+def plot_price_series(prices):
+    fig, ax = plt.subplots(figsize=(14, 6))
+    for col in prices.columns:
+        ax.plot(prices.index, prices[col], label=col)
+    ax.set_title('Closing Prices', color='white')
+    ax.set_xlabel('Date', color='white')
+    ax.set_ylabel('Price', color='white')
+    ax.xaxis.set_major_locator(mdates.MonthLocator(interval=2))
+    ax.xaxis.set_major_formatter(mdates.DateFormatter('%b %Y'))
+    ax.tick_params(colors='white')
+    ax.legend()
+    fig.tight_layout()
+    plt.show()
+
+
+def plot_heatmap(returns_df, title):
+    if returns_df.dropna().empty:
+        print('No data for heatmap:', title)
+        return
+    corr = returns_df.corr()
+    fig, ax = plt.subplots(figsize=(8, 6))
+    cmap = sns.diverging_palette(240, 10, as_cmap=True)  # blue-red
+    sns.heatmap(corr, annot=True, fmt='.2f', cmap=cmap, vmin=-1, vmax=1, linewidths=0.5,
+                cbar_kws={'shrink': 0.7}, square=True, ax=ax)
+    ax.set_title(title, color='white')
+    fig.tight_layout()
+    plt.show()
+
+
+def plot_detailed_heatmaps(returns_df):
+    # 1) Correlation heatmap (daily)
+    plot_heatmap(returns_df, 'Daily Returns Correlation (RdBu)')
+
+    # 2) Covariance heatmap
+    cov = returns_df.cov()
+    fig, ax = plt.subplots(figsize=(8, 6))
+    sns.heatmap(cov, annot=True, fmt='.2f', cmap='coolwarm', ax=ax)
+    ax.set_title('Covariance of Returns', color='white')
+    fig.tight_layout(); plt.show()
+
+    # 3) Clustered correlation (clustermap) — only when finite
+    corrmat = returns_df.corr()
+    if np.isfinite(corrmat.values).all():
+        sns.clustermap(corrmat, cmap='RdBu_r', annot=True, figsize=(8, 8))
+        plt.suptitle('Clustered Correlation (RdBu)', color='white', y=1.02)
+        plt.show()
+    else:
+        print('Skipping clustermap: non-finite correlation matrix')
+
+    # 4) Rolling-window monthly correlation heatmap (months x tickers)
+    monthly_corrs = []
+    months = pd.date_range(returns_df.index.min(), returns_df.index.max(), freq='M')
+    for m in months:
+        window = returns_df.loc[m - pd.offsets.MonthBegin(1):m]
+        if len(window) > 0:
+            monthly_corrs.append(window.corr().values)
+    if monthly_corrs:
+        arr = np.stack(monthly_corrs)
+        # average correlation between series across months
+        mean_corr = np.mean(arr, axis=0)
+        fig, ax = plt.subplots(figsize=(8, 6))
+        sns.heatmap(mean_corr, xticklabels=returns_df.columns, yticklabels=returns_df.columns,
+                    cmap='RdBu_r', vmin=-1, vmax=1, annot=True, ax=ax)
+        ax.set_title('Average Monthly Correlation (RdBu)', color='white')
+        fig.tight_layout(); plt.show()
+
+
+def plot_pca_and_eigen(returns_df):
+    vals = returns_df.dropna()
+    pca = PCA(n_components=min(len(vals.columns), vals.shape[1]))
+    comps = pca.fit_transform(vals.fillna(0))
+    loadings = pca.components_
+
+    fig, ax = plt.subplots(figsize=(8, 4))
+    ax.bar(range(1, len(pca.explained_variance_ratio_) + 1), pca.explained_variance_ratio_, color='#FF6F61')
+    ax.set_title('PCA Explained Variance Ratio', color='white')
+    ax.set_xlabel('PC', color='white')
+    ax.set_ylabel('Variance Ratio', color='white')
+    fig.tight_layout(); plt.show()
+
+    # Loadings heatmap
+    fig, ax = plt.subplots(figsize=(8, 6))
+    sns.heatmap(loadings, cmap='RdBu_r', center=0, xticklabels=vals.columns, yticklabels=[f'PC{i+1}' for i in range(loadings.shape[0])], ax=ax)
+    ax.set_title('PCA Loadings (RdBu)', color='white')
+    fig.tight_layout(); plt.show()
+
+
+def rolling_sharpe(returns, window=60):
+    # returns in percent -> convert to decimal
+    r = returns / 100.0
+    roll_mean = r.rolling(window).mean()
+    roll_std = r.rolling(window).std()
+    sharpe = (roll_mean / roll_std) * np.sqrt(252)
+    fig, ax = plt.subplots(figsize=(14, 4))
+    for col in sharpe.columns:
+        ax.plot(sharpe.index, sharpe[col], label=col)
+    ax.set_title(f'Rolling {window}-Day Sharpe Ratio', color='white')
+    ax.legend(); fig.tight_layout(); plt.show()
+
+
+def drawdown_series(prices):
+    wealth = prices / prices.iloc[0]
+    peak = wealth.cummax()
+    drawdown = (wealth - peak) / peak
+    fig, ax = plt.subplots(figsize=(14, 4))
+    for col in drawdown.columns:
+        ax.plot(drawdown.index, drawdown[col], label=col)
+    ax.set_title('Drawdown', color='white')
+    ax.legend(); fig.tight_layout(); plt.show()
+
+
+def drawdown_heatmap(prices):
+    # Monthly return heatmap per year (robust pivot)
+    monthly = prices.resample('M').last().pct_change() * 100
+    # pick first series for a clear heatmap
+    col = monthly.columns[0]
+    pivot = monthly[[col]].reset_index()
+    pivot['year'] = pivot['Date'].dt.year if 'Date' in pivot.columns else pivot['index'].dt.year if 'index' in pivot.columns else pivot['index']
+    # safer approach: use index
+    pivot = monthly.copy()
+    pivot['year'] = pivot.index.year
+    pivot['month'] = pivot.index.month
+    table = pivot.reset_index().pivot(index='year', columns='month', values=col)
+    fig, ax = plt.subplots(figsize=(12, 4))
+    sns.heatmap(table, cmap='RdBu_r', center=0, annot=True, fmt='.2f', ax=ax)
+    ax.set_title('Monthly Return Heatmap', color='white')
+    fig.tight_layout(); plt.show()
+
+
+def var_heatmap(returns):
+    # compute monthly VaR (5%) and heatmap across months and years
+    r = returns.copy()
+    r['year'] = r.index.year
+    r['month'] = r.index.month
+    var = r.groupby(['year', 'month']).apply(lambda x: pd.Series({'VaR': np.percentile(x.drop(columns=['year','month']).values.flatten(), 5)}))
+    var = var.reset_index()
+    pivot = var.pivot(index='year', columns='month', values='VaR')
+    fig, ax = plt.subplots(figsize=(12, 4))
+    sns.heatmap(pivot, cmap='RdBu_r', center=0, ax=ax)
+    ax.set_title('Monthly 5% VaR (approx)', color='white')
+    fig.tight_layout(); plt.show()
+
+
+def skew_kurt_heatmap(returns):
+    r = returns.copy()
+    r['year'] = r.index.year
+    r['month'] = r.index.month
+    stats_df = []
+    for (y, m), group in r.groupby(['year', 'month']):
+        vals = group.drop(columns=['year', 'month']).values.flatten()
+        stats_df.append({'year': y, 'month': m, 'skew': stats.skew(vals), 'kurt': stats.kurtosis(vals)})
+    stats_df = pd.DataFrame(stats_df)
+    for metric in ['skew', 'kurt']:
+        pivot = stats_df.pivot(index='year', columns='month', values=metric)
+        fig, ax = plt.subplots(figsize=(12, 4))
+        sns.heatmap(pivot, cmap='RdBu_r', center=0, ax=ax)
+        ax.set_title(f'Monthly {metric.capitalize()}', color='white')
+        fig.tight_layout(); plt.show()
+
+
+def monthly_pivot_heatmap(returns):
+    # pivot table of mean returns per month for each year
+    returns['year'] = returns.index.year
+    returns['month'] = returns.index.month
+    grouped = returns.groupby(['year', 'month']).mean()
+    pivot = grouped.reset_index().pivot(index='year', columns='month', values=grouped.columns[0])
+    fig, ax = plt.subplots(figsize=(12, 4))
+    sns.heatmap(pivot, cmap='RdBu_r', center=0, annot=True, fmt='.2f', ax=ax)
+    ax.set_title('Monthly Mean Returns', color='white')
+    fig.tight_layout(); plt.show()
+
+
+def weekday_heatmap(returns):
+    df = returns.copy()
+    df['weekday'] = df.index.weekday
+    df['year'] = df.index.year
+    grouped = df.groupby(['weekday', 'year']).mean().unstack(level=1)
+    fig, ax = plt.subplots(figsize=(12, 4))
+    sns.heatmap(grouped.iloc[:, :], cmap='RdBu_r', center=0, ax=ax)
+    ax.set_title('Average Return by Weekday and Year', color='white')
+    fig.tight_layout(); plt.show()
+
+
+def pca_components_heatmap(returns):
+    df = returns.dropna()
+    pca = PCA(n_components=min(df.shape[1], 5))
+    pca.fit(df)
+    comps = pca.components_
+    fig, ax = plt.subplots(figsize=(8, 4))
+    sns.heatmap(comps, cmap='RdBu_r', center=0, xticklabels=df.columns, yticklabels=[f'PC{i+1}' for i in range(comps.shape[0])], ax=ax)
+    ax.set_title('PCA Components Heatmap', color='white')
+    fig.tight_layout(); plt.show()
+
+
+def correlation_lag_heatmap(returns, max_lag=10):
+    cols = returns.columns
+    lagmat = np.zeros((len(cols), max_lag * 2 + 1))
+    lags = list(range(-max_lag, max_lag + 1))
+    for i, col in enumerate(cols):
+        for j, lag in enumerate(lags):
+            shifted = returns[col].shift(-lag).dropna()
+            ref = returns[cols[0]].loc[shifted.index]
+            lagmat[i, j] = np.corrcoef(shifted, ref)[0, 1] if len(shifted) > 2 else np.nan
+    fig, ax = plt.subplots(figsize=(12, 4))
+    sns.heatmap(lagmat, xticklabels=lags, yticklabels=cols, cmap='RdBu_r', center=0, ax=ax)
+    ax.set_title('Lagged Correlation vs First Series', color='white')
+    fig.tight_layout(); plt.show()
+
+
+def return_quantiles_over_time(returns):
+    # monthly percentiles heatmap
+    col = returns.columns[0]
+    monthly_q = returns[col].resample('M').apply(lambda x: np.percentile(x.dropna(), [10, 25, 50, 75, 90]) if len(x.dropna()) > 0 else [np.nan]*5)
+    q = pd.DataFrame(list(monthly_q.values), index=monthly_q.index, columns=['p10', 'p25', 'p50', 'p75', 'p90'])
+    fig, ax = plt.subplots(figsize=(12, 4))
+    sns.heatmap(q.T, cmap='RdBu_r', annot=False, ax=ax)
+    ax.set_title('Monthly Return Quantiles (first series)', color='white')
+    fig.tight_layout(); plt.show()
+
+
+def bollinger_bands(prices, window=20):
+    for col in prices.columns:
+        series = prices[col]
+        ma = series.rolling(window).mean()
+        std = series.rolling(window).std()
+        upper = ma + 2 * std
+        lower = ma - 2 * std
+        fig, ax = plt.subplots(figsize=(12, 4))
+        ax.plot(series.index, series, label=col)
+        ax.plot(ma.index, ma, label='MA', color='#FFD166')
+        ax.fill_between(series.index, lower, upper, color='#5DA5FF', alpha=0.2)
+        ax.set_title(f'Bollinger Bands: {col}', color='white')
+        ax.legend(); fig.tight_layout(); plt.show()
+
+
+def stacked_monthly_bars(monthly_returns):
+    fig, ax = plt.subplots(figsize=(14, 5))
+    idx = monthly_returns.index
+    bottom = np.zeros(len(idx))
+    for col in monthly_returns.columns:
+        ax.bar(idx, monthly_returns[col], bottom=bottom, label=col)
+        bottom += monthly_returns[col].values
+    ax.set_title('Stacked Monthly Returns', color='white')
+    ax.legend(); fig.tight_layout(); plt.show()
+
+
+def pct_positive_by_month(monthly_returns):
+    df = (monthly_returns > 0).astype(int)
+    df['year'] = df.index.year
+    df['month'] = df.index.month
+    pivot = df.groupby(['year', 'month']).mean().reset_index().pivot(index='year', columns='month', values=df.columns[0])
+    fig, ax = plt.subplots(figsize=(12, 4))
+    sns.heatmap(pivot, cmap='RdBu_r', center=0.5, annot=True, fmt='.2f', ax=ax)
+    ax.set_title('% Positive Months', color='white')
+    fig.tight_layout(); plt.show()
+
+
+def rolling_vol_heatmap(returns, windows=[20, 60, 120]):
+    # compute rolling vol for different windows and plot as heatmap (window x time)
+    vals = []
+    labels = []
+    for w in windows:
+        vol = returns.rolling(w).std()
+        vals.append(vol.mean(axis=1).values)
+        labels.append(f'{w}d')
+    arr = np.vstack(vals)
+    fig, ax = plt.subplots(figsize=(14, 4))
+    sns.heatmap(arr, cmap='RdBu_r', center=0, yticklabels=labels, ax=ax)
+    ax.set_title('Rolling Volatility (avg across series)', color='white')
+    fig.tight_layout(); plt.show()
+
+
+
+def plot_pairplot(returns_df, fname=None):
+    sns.set_style('darkgrid')
+    pp = sns.pairplot(returns_df, kind='scatter', diag_kind='kde', plot_kws={'s': 18, 'alpha': 0.6})
+    pp.fig.suptitle('Pairplot of Returns', color='white', y=1.02)
+    plt.show()
+    sns.set_style('dark')
+
+
+def plot_distributions(daily_returns, fname_prefix=None):
+    fig, axes = plt.subplots(len(daily_returns.columns), 1, figsize=(10, 4 * len(daily_returns.columns)))
+    if len(daily_returns.columns) == 1:
+        axes = [axes]
+    for ax, col in zip(axes, daily_returns.columns):
+        sns.histplot(daily_returns[col], bins=120, kde=True, ax=ax, color='#5DA5FF')
+        ax.set_title(f'Distribution of Daily Returns: {col}', color='white')
+        ax.set_xlabel('Daily Return (%)', color='white')
+        ax.set_ylabel('Count', color='white')
+        ax.tick_params(colors='white')
+    fig.tight_layout()
+    plt.show()
+
+
+def plot_kde_overlay(daily_returns, fname=None):
+    fig, ax = plt.subplots(figsize=(10, 6))
+    for col in daily_returns.columns:
+        sns.kdeplot(daily_returns[col], fill=False, linewidth=2, label=col, ax=ax)
+    ax.set_title('KDE Overlay of Daily Returns', color='white')
+    ax.legend()
+    fig.tight_layout()
+    plt.show()
+
+
+def plot_cumulative(cum_returns, fname=None):
+    fig, ax = plt.subplots(figsize=(14, 6))
+    for col in cum_returns.columns:
+        ax.plot(cum_returns.index, cum_returns[col] * 100, label=col)
+    ax.set_title('Cumulative Returns (%)', color='white')
+    ax.set_ylabel('Cumulative Return (%)', color='white')
+    ax.set_xlabel('Date', color='white')
+    ax.legend()
+    ax.grid(alpha=0.3)
+    fig.tight_layout()
+    plt.show()
+
+
+def plot_rolling_stats(daily_returns, window=30, fname_prefix=None):
+    fig, ax = plt.subplots(figsize=(14, 6))
+    for col in daily_returns.columns:
+        rolling_mean = daily_returns[col].rolling(window).mean()
+        rolling_std = daily_returns[col].rolling(window).std()
+        ax.plot(rolling_mean.index, rolling_mean, label=f'{col} {window}d mean')
+        ax.plot(rolling_std.index, rolling_std, linestyle='--', label=f'{col} {window}d vol')
+    ax.set_title(f'Rolling {window}-Day Mean and Volatility', color='white')
+    ax.legend()
+    fig.tight_layout()
+    plt.show()
+
+
+def plot_scatter_with_regression(daily_returns, xcol, ycol, fname=None):
+    fig, ax = plt.subplots(figsize=(8, 6))
+    sns.regplot(x=daily_returns[xcol], y=daily_returns[ycol], scatter_kws={'s': 10, 'alpha': 0.6}, ax=ax)
+    ax.set_title(f'Scatter: {xcol} vs {ycol} (with regression)', color='white')
+    fig.tight_layout()
+    plt.show()
+
+
+def plot_jointplot(daily_returns, xcol, ycol, fname=None):
+    jp = sns.jointplot(x=daily_returns[xcol], y=daily_returns[ycol], kind='hex', height=8, marginal_kws=dict(bins=40))
+    jp.fig.suptitle(f'Jointplot: {xcol} vs {ycol}', y=1.02, color='white')
+    plt.show()
+
+
+def plot_monthly_boxplot(monthly_returns, fname=None):
+    # Prepare month name column
+    m = monthly_returns.copy()
+    m['month'] = m.index.month
+    m['month_name'] = m.index.strftime('%b')
+    fig, ax = plt.subplots(figsize=(12, 6))
+    sns.boxplot(x='month_name', y=m.columns[0], data=m.reset_index(), ax=ax)
+    ax.set_title(f'Boxplot of Monthly Returns: {m.columns[0]}', color='white')
+    ax.tick_params(colors='white')
+    fig.tight_layout()
+    plt.show()
+
+
+def plot_violin(daily_returns, fname=None):
+    fig, ax = plt.subplots(figsize=(10, 6))
+    sns.violinplot(data=daily_returns, inner='quartile', ax=ax)
+    ax.set_title('Violin Plot of Daily Returns', color='white')
+    ax.tick_params(colors='white')
+    fig.tight_layout()
+    plt.show()
+
+
+def plot_autocorr_and_lag(daily_returns, fname_prefix=None):
+    for col in daily_returns.columns:
+        fig1 = plt.figure(figsize=(8, 4))
+        autocorrelation_plot(daily_returns[col], ax=fig1.gca())
+        plt.title(f'Autocorrelation: {col}', color='white')
+        plt.show()
+
+        fig2 = plt.figure(figsize=(6, 6))
+        lag_plot(daily_returns[col], ax=fig2.gca())
+        plt.title(f'Lag Plot: {col}', color='white')
+        plt.show()
+
+
+def plot_monthly_bar(monthly_returns, fname=None):
+    fig, ax = plt.subplots(figsize=(12, 6))
+    idx = monthly_returns.index
+    width = 20
+    for i, col in enumerate(monthly_returns.columns):
+        ax.bar(idx + pd.Timedelta(days=i * width), monthly_returns[col], width=width, alpha=0.7, label=col)
+    ax.set_title('Monthly Returns (%)', color='white')
+    ax.legend()
+    fig.tight_layout()
+    plt.show()
+
+
+def main():
+    tickers = {'US30': '^DJI', 'JPY225': '^N225'}
+    start_date = '2023-01-01'
+    end_date = '2025-06-30'
+
+    prices = download_data(list(tickers.values()), start=start_date, end=end_date)
+    prices.columns = list(tickers.keys())
+
+    daily, monthly, cum = compute_returns(prices)
+
+    # 1 Price time series
+    plot_price_series(prices)
+
+    # Detailed red/blue heatmaps and clustered maps
+    plot_detailed_heatmaps(daily)
+
+    # Pairplot (monthly)
+    try:
+        plot_pairplot(monthly)
+    except Exception:
+        plot_pairplot(monthly)
+
+    # Distributions & KDE
+    plot_distributions(daily)
+    plot_kde_overlay(daily)
+
+    # Cumulative returns
+    plot_cumulative(cum)
+
+    # Rolling stats
+    plot_rolling_stats(daily, window=30)
+
+    # Scatter + regression (use the two tickers)
+    k0, k1 = list(tickers.keys())[0], list(tickers.keys())[1]
+    plot_scatter_with_regression(daily, k0, k1)
+
+    # Jointplot
+    plot_jointplot(daily, k0, k1)
+
+    # Monthly boxplot (first ticker)
+    plot_monthly_boxplot(monthly[[list(tickers.keys())[0]]])
+
+    # Violin plot
+    plot_violin(daily)
+
+    # Autocorrelation & lag plots
+    plot_autocorr_and_lag(daily)
+
+    # Monthly bar chart
+    plot_monthly_bar(monthly)
+
+    # 60-Day rolling correlation time series
+    if len(daily.columns) >= 2:
+        r = daily[daily.columns].rolling(60).corr()
+        # unstack may produce different shapes depending on pandas version
+        try:
+            pair_corr = r.unstack().iloc[:, 0]
+        except Exception:
+            # fallback: compute pairwise rolling corr for first two series
+            pair_corr = daily[daily.columns[:2]].rolling(60).corr().dropna()
+        fig, ax = plt.subplots(figsize=(14, 4))
+        if getattr(pair_corr.index, 'nlevels', 1) > 1:
+            idx = pair_corr.index.droplevel(1)
+        else:
+            idx = pair_corr.index
+        ax.plot(idx, pair_corr.values)
+        ax.set_title('60-Day Rolling Correlation', color='white')
+        ax.tick_params(colors='white')
+        fig.tight_layout(); plt.show()
+
+   
+    plot_pca_and_eigen(daily)
+    rolling_sharpe(daily, window=60)
+    drawdown_series(prices)
+    drawdown_heatmap(prices)
+    var_heatmap(daily)
+    skew_kurt_heatmap(daily)
+    monthly_pivot_heatmap(daily)
+    weekday_heatmap(daily)
+    pca_components_heatmap(daily)
+    correlation_lag_heatmap(daily, max_lag=15)
+    return_quantiles_over_time(daily)
+    bollinger_bands(prices, window=20)
+    stacked_monthly_bars(monthly)
+    pct_positive_by_month(monthly)
+    rolling_vol_heatmap(daily)
+
+
+if __name__ == '__main__':
+    main()
