@@ -16,7 +16,7 @@ The work adopts a research-driven framework commonly used in macroeconomic and f
 
 The main deliverable of this project is the full written analysis:
 
-**.pdf**
+**JPY225_US30_Review_2025.pdf**
 
 This report provides a comprehensive examination of:
 
